@@ -1,13 +1,17 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN
+import database as db
+import keyboards as kb
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,13 +76,7 @@ questions = [
         None,
         "Я сохраняю уверенность в себе",
     ),
-    (
-        "Легко ли ты подстроишься под внезапные перемены?",
-        "x",
-        "Да",
-        None,
-        "Нет"
-    ),
+    ("Легко ли ты подстроишься под внезапные перемены?", "x", "Да", None, "Нет"),
     (
         "Заденут ли тебя неприятные взгляды и мысли других существ?",
         "n",
@@ -397,21 +395,29 @@ def get_result(x, n):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    user_first_name = message.from_user.first_name
+    user = message.from_user
+
+    # Проверяем, есть ли пользователь уже в базе данных
+    subscription = db.get_user_subscription(user.id)
 
     # Приветственное сообщение
     welcome_message = (
-        f"Привет, {user_first_name}!\n\n"
+        f"Привет, {user.first_name}!\n\n"
         "Начни путешествие к себе в телеграм mini-app ИКИ: календарь эмоций, заметки о событиях, "
         "а в будущем — интерактивные истории.\n\n"
+        "🔔 Хочешь, чтобы я напоминал тебе каждый день вести дневник эмоций?\n"
+        "Выбери удобное время или отключи уведомления в любой момент.\n\n"
         "Открывай приложение, чтобы отметить, как ты себя чувствуешь сегодня.\n\n"
         "Хочешь пройти наше тестирование? Напиши /test в чат.\n\n"
-        
         "Подписывайся на наш канал, чтобы быть в курсе новостей и оставлять обратную связь: "
         "https://t.me/ikiproject"
     )
 
-    await message.answer(welcome_message)
+    if not subscription:
+        await message.answer(welcome_message, reply_markup=kb.get_subscribe_keyboard())
+
+    else:
+        await message.answer(welcome_message)
 
 
 # Обработчик команды /test
@@ -419,7 +425,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     user_first_name = message.from_user.first_name
-
 
     # Атмосферный текст
     await message.answer(
@@ -431,11 +436,71 @@ async def cmd_start(message: types.Message, state: FSMContext):
     # Кнопка "Начать тестирование"
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Начать тестирование", callback_data="start_test")]
+            [
+                InlineKeyboardButton(
+                    text="🚀 Начать тестирование", callback_data="start_test"
+                )
+            ]
         ]
     )
 
     await message.answer("Готовы начать тестирование?", reply_markup=keyboard)
+
+
+# Обработчик команды /settings
+@dp.message(Command("settings"))
+async def cmd_settings(message: types.Message):
+    user_id = message.from_user.id
+    subscription = db.get_user_subscription(user_id)
+
+    text = "⚙️ **Настройки напоминаний**\n\n"
+    if subscription and subscription[0]:
+        text += f"Текущее время напоминаний: *{subscription[1]}*"
+    else:
+        text += "У вас отключены напоминания."
+
+    await message.answer(
+        text, reply_markup=kb.get_settings_keyboard(subscription), parse_mode="Markdown"
+    )
+
+
+@dp.callback_query(F.data == "subscribe")
+async def cb_subscribe(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "Отлично! Выбери удобное время для напоминаний:",
+        reply_markup=kb.get_time_selection_keyboard(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("set_time_"))
+async def cb_set_time(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    notification_time = callback.data.split("_")[2]
+    db.add_or_update_user(user_id, subscribed=True, notification_time=notification_time)
+
+    await callback.message.edit_text(
+        f"✅ Напоминания включены! Я буду присылать их ежедневно в {notification_time}."
+    )
+    await callback.answer(text="Настройки сохранены!", show_alert=False)
+
+
+@dp.callback_query(F.data == "unsubscribe")
+async def cb_unsubscribe(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    db.add_or_update_user(user_id, subscribed=False, notification_time=None)
+
+    await callback.message.edit_text(
+        "🚫 Напоминания отключены. Вы всегда можете включить их снова через /settings."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "change_time")
+async def cb_change_time(callback: types.CallbackQuery):
+    # Эта кнопка функционально идентична 'subscribe'
+    await cb_subscribe(callback)
+
 
 # Обработчик нажатия на кнопку "Начать"
 @dp.callback_query(lambda c: c.data == "start_test")
@@ -530,7 +595,52 @@ async def process_answer(callback_query: types.CallbackQuery, state: FSMContext)
     await callback_query.answer()
 
 
+async def send_reminder(bot: Bot, time_str: str):
+    users = db.get_subscribed_users_by_time(time_str)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📝 Открыть дневник", url="https://t.me/ikiproject"
+    )  # Замените URL
+
+    for user_id in users:
+        try:
+            await bot.send_message(
+                user_id,
+                "Не забудь отметить, как ты себя чувствуешь сегодня ✨",
+                reply_markup=builder.as_markup(),
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+
+
 async def main():
+    db.init_db()
+
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    scheduler.add_job(
+        send_reminder,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        kwargs={"bot": bot, "time_str": "09:00"},
+    )
+    scheduler.add_job(
+        send_reminder,
+        trigger="cron",
+        hour=14,
+        minute=0,
+        kwargs={"bot": bot, "time_str": "14:00"},
+    )
+    scheduler.add_job(
+        send_reminder,
+        trigger="cron",
+        hour=20,
+        minute=0,
+        kwargs={"bot": bot, "time_str": "20:00"},
+    )
+    scheduler.start()
+
     await dp.start_polling(bot)
 
 
