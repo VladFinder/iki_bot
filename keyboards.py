@@ -12,9 +12,9 @@ def get_subscribe_keyboard():
 def get_time_selection_keyboard():
     """Возвращает клавиатуру для выбора времени напоминаний."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="🌅 Утро (09:00)", callback_data="set_time_09:00")
-    builder.button(text="☀️ День (14:00)", callback_data="set_time_14:00")
-    builder.button(text="🌙 Вечер (20:00)", callback_data="set_time_20:00")
+    builder.button(text="🌅 Утро (09:00) МСК", callback_data="set_time_09:00")
+    builder.button(text="☀️ День (14:00) МСК", callback_data="set_time_14:00")
+    builder.button(text="🌙 Вечер (20:00) МСК", callback_data="set_time_20:00")
     builder.adjust(1)
     return builder.as_markup()
 
