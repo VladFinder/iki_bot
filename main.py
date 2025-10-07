@@ -598,9 +598,11 @@ async def send_reminder(bot: Bot, time_str: str):
     users = db.get_subscribed_users_by_time(time_str)
 
     builder = InlineKeyboardBuilder()
+    web_app_url = "https://ikiteam.ru/"
     builder.button(
-        text="📝 Открыть дневник", url="https://t.me/ikiproject"
-    )  # Замените URL
+        text="📝 Открыть дневник", 
+        web_app=types.WebAppInfo(url=web_app_url)
+    )
 
     for user_id in users:
         try:
